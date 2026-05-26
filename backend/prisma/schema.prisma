@@ -7,4 +7,103 @@ datasource db {
   url      = "file:./dev.db"
 }
 
-// Design your schema here
+model Party {
+  id                  String              @id @default(cuid())
+  code                String              @unique
+  name                String
+  status              String              @default("LOBBY")
+  maxSongs            Int                 @default(15)
+  songsPerPerson      Int                 @default(3)
+  timeLimit           String              @default("NONE")
+  currentSongId       String?
+  playbackStartedAt   DateTime?
+  playbackPausedAt    DateTime?
+  elapsedMs           Int                 @default(0)
+  createdAt           DateTime            @default(now())
+  startedAt           DateTime?
+  endedAt             DateTime?
+  participants        Participant[]
+  songs               Song[]
+  events              PartyEvent[]
+}
+
+model Participant {
+  id               String    @id @default(cuid())
+  partyId          String
+  displayName      String
+  isHost           Boolean   @default(false)
+  isRemoved        Boolean   @default(false)
+  isAway           Boolean   @default(false)
+  sessionToken     String    @unique
+  socketId         String?
+  spotifyUserId    String?
+  joinedAt         DateTime  @default(now())
+  lastSeenAt       DateTime  @default(now())
+  reclaimExpiresAt DateTime?
+  party            Party     @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  songs            Song[]
+  votes            Vote[]
+  reactions        Reaction[]
+}
+
+model Song {
+  id              String       @id @default(cuid())
+  partyId         String
+  participantId   String
+  spotifyTrackId  String
+  spotifyUri      String
+  title           String
+  artist          String
+  album           String
+  durationMs      Int
+  albumArtUrl     String
+  previewUrl      String?
+  status          String       @default("QUEUED")
+  submissionOrder Int
+  startedAt       DateTime?
+  endedAt         DateTime?
+  skippedAtMs     Int?
+  finalScore      Float?
+  tokenScore      Float?
+  participationBonus Float?
+  goatBonus       Float?
+  skipPenaltyApplied Boolean   @default(false)
+  isPlayable      Boolean      @default(true)
+  party           Party        @relation(fields: [partyId], references: [id], onDelete: Cascade)
+  participant     Participant  @relation(fields: [participantId], references: [id])
+  votes           Vote[]
+  reactions       Reaction[]
+
+  @@unique([partyId, spotifyTrackId])
+}
+
+model Vote {
+  id            String      @id @default(cuid())
+  songId        String
+  participantId String
+  tokens        Int         @default(0)
+  updatedAt     DateTime    @updatedAt
+  song          Song        @relation(fields: [songId], references: [id], onDelete: Cascade)
+  participant   Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@unique([songId, participantId])
+}
+
+model Reaction {
+  id            String       @id @default(cuid())
+  songId        String
+  participantId String
+  type          String
+  createdAt     DateTime     @default(now())
+  song          Song         @relation(fields: [songId], references: [id], onDelete: Cascade)
+  participant   Participant  @relation(fields: [participantId], references: [id], onDelete: Cascade)
+}
+
+model PartyEvent {
+  id        String   @id @default(cuid())
+  partyId   String
+  type      String
+  message   String
+  createdAt DateTime @default(now())
+  party     Party    @relation(fields: [partyId], references: [id], onDelete: Cascade)
+}
