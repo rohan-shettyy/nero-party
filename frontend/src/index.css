@@ -1,3 +1,43 @@
+@import url("https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Manrope:wght@600;700;800;900&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-on-surface font-body;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(at 0% 0%, rgba(188, 237, 220, 0.16) 0, transparent 45%),
+      radial-gradient(at 100% 100%, rgba(225, 220, 249, 0.16) 0, transparent 45%);
+  }
+
+  button,
+  input,
+  select {
+    font: inherit;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply rounded-xl border border-white/70 bg-white/75 shadow-glass;
+    backdrop-filter: blur(18px);
+  }
+
+  .icon {
+    font-family: "Material Symbols Outlined";
+    font-weight: normal;
+    font-style: normal;
+    font-size: 22px;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    direction: ltr;
+    -webkit-font-feature-settings: "liga";
+    -webkit-font-smoothing: antialiased;
+  }
+}
