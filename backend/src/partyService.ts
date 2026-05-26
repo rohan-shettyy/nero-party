@@ -37,7 +37,7 @@ export function createPartyService(prisma: PrismaClient) {
       voterCount: song.votes.filter((vote) => vote.tokens > 0).length,
       reactionsByType: summarizeReactions(song.reactions),
       submittedBy: song.participant.displayName,
-      votes: undefined,
+      votes: song.votes.map((v) => ({ participantId: v.participantId, tokens: v.tokens })),
       reactions: undefined,
       participant: undefined,
     }));
@@ -303,17 +303,54 @@ export function createPartyService(prisma: PrismaClient) {
     return serializeParty(party.code);
   }
 
-  async function rewindPlayback(code: string, amountMs = 10_000) {
-    const party = await prisma.party.findUnique({ where: { code: normalizeCode(code) } });
-    if (!party || party.status !== "ACTIVE") throw new Error("Party is not active");
-    const elapsedMs = Math.max(0, getElapsedMs(party.playbackStartedAt, party.elapsedMs) - amountMs);
-    await prisma.party.update({
-      where: { id: party.id },
-      data: {
-        elapsedMs,
-        playbackStartedAt: party.playbackStartedAt ? new Date() : null,
-      },
+  async function previousOrRestart(code: string) {
+    const party = await prisma.party.findUnique({
+      where: { code: normalizeCode(code) },
+      include: { songs: { orderBy: { submissionOrder: "asc" } } },
     });
+    if (!party || party.status !== "ACTIVE" || !party.currentSongId) throw new Error("Party is not active");
+    const elapsedMs = getElapsedMs(party.playbackStartedAt, party.elapsedMs);
+    const currentIndex = party.songs.findIndex((song) => song.id === party.currentSongId);
+    const shouldGoPrevious = elapsedMs < 3_000 && currentIndex > 0;
+    const targetSong = shouldGoPrevious ? party.songs[currentIndex - 1] : party.songs[currentIndex];
+
+    if (shouldGoPrevious) {
+      await prisma.$transaction([
+        prisma.song.update({ where: { id: party.currentSongId }, data: { status: "QUEUED", startedAt: null } }),
+        prisma.song.update({
+          where: { id: targetSong.id },
+          data: {
+            status: "PLAYING",
+            startedAt: new Date(),
+            endedAt: null,
+            skippedAtMs: null,
+            finalScore: null,
+            tokenScore: null,
+            participationBonus: null,
+            goatBonus: null,
+            skipPenaltyApplied: false,
+          },
+        }),
+        prisma.party.update({
+          where: { id: party.id },
+          data: {
+            currentSongId: targetSong.id,
+            elapsedMs: 0,
+            playbackStartedAt: party.playbackStartedAt ? new Date() : null,
+            playbackPausedAt: party.playbackPausedAt ? new Date() : null,
+          },
+        }),
+      ]);
+    } else {
+      await prisma.party.update({
+        where: { id: party.id },
+        data: {
+          elapsedMs: 0,
+          playbackStartedAt: party.playbackStartedAt ? new Date() : null,
+        },
+      });
+    }
+
     return serializeParty(party.code);
   }
 
@@ -509,7 +546,7 @@ export function createPartyService(prisma: PrismaClient) {
     skipSong,
     pausePlayback,
     resumePlayback,
-    rewindPlayback,
+    previousOrRestart,
     advanceCurrentSong,
     endParty,
     leaveParty,

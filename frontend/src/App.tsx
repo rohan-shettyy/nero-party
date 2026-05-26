@@ -291,7 +291,7 @@ function LobbyScreen({
               <img alt="Join QR code" src={qrUrl} className="h-40 w-40" />
             </div>
             <div className="text-center md:text-left">
-              <span className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Join the Party</span>
+              <span className="text-xs font-bold uppercase tracking-widest text-on-surface-variant">Join the Party: <span className="font-semibold text-primary">{party.name}</span></span>
               <h1 className="mt-1 font-display text-5xl font-bold text-primary">{party.code}</h1>
               <p className="mb-4 mt-2 text-on-surface-variant">Share this code or scan the QR to invite guests.</p>
               <button onClick={() => navigator.clipboard.writeText(party.joinUrl)} className="rounded-full border border-outline-variant px-5 py-2 text-sm font-semibold text-primary">
@@ -317,25 +317,31 @@ function LobbyScreen({
                   </button>
                 )}
                 <LobbySettingsEditor party={party} participantId={session.participantId} />
+                <button
+                  disabled={!canStart}
+                  onClick={() => socket.emit("party:start", { code: party.code, participantId: session.participantId })}
+                  className={`mt-6 w-full rounded-2xl py-4 font-semibold transition ${canStart ? "bg-primary text-white shadow-lg active:scale-95" : "cursor-not-allowed bg-outline-variant text-on-surface-variant"}`}
+                >
+                  Start Party
+                </button>
+                {!canStart && (
+                  <p className="mt-4 text-center text-xs text-on-surface-variant">
+                    {!hostSpotifyReady ? "Host Spotify connection required to start." : "Need 2 participants and 1 queued song."}
+                  </p>
+                )}
               </>
             ) : (
-              <dl className="mt-6 space-y-4 text-sm">
-                <Setting label="Max songs in queue" value={formatLimit(party.maxSongs)} />
-                <Setting label="Songs per person" value={formatLimit(party.songsPerPerson)} />
-                <Setting label="Time limit" value={formatTimeLimit(party.timeLimit)} />
-              </dl>
-            )}
-            <button
-              disabled={!canStart}
-              onClick={() => socket.emit("party:start", { code: party.code, participantId: session.participantId })}
-              className={`mt-4 w-full rounded-2xl py-4 font-semibold transition ${canStart ? "bg-primary text-white shadow-lg active:scale-95" : "cursor-not-allowed bg-outline-variant text-on-surface-variant"}`}
-            >
-              Start Party
-            </button>
-            {!canStart && (
-              <p className="mt-4 text-center text-xs text-on-surface-variant">
-                {isHost && !hostSpotifyReady ? "Host Spotify connection required to start." : "Need 2 participants and 1 queued song."}
-              </p>
+              <>
+                <dl className="mt-6 space-y-4 text-sm">
+                  <Setting label="Max songs in queue" value={formatLimit(party.maxSongs)} />
+                  <Setting label="Songs per person" value={formatLimit(party.songsPerPerson)} />
+                  <Setting label="Time limit" value={formatTimeLimit(party.timeLimit)} />
+                </dl>
+                <div className="mt-6 flex flex-col items-center gap-3 rounded-2xl bg-primary-container/20 p-5 text-center">
+                  <span className="icon text-primary animate-pulse">hourglass_empty</span>
+                  <p className="text-sm font-semibold text-primary">Waiting for host to start the party...</p>
+                </div>
+              </>
             )}
           </GlassCard>
           <Activity events={party.events} />
@@ -408,52 +414,220 @@ function PartyScreen({
 }) {
   const current = party.songs.find((song) => song.id === party.currentSongId) ?? party.songs[0];
   const elapsed = useElapsed(party, current);
+  const [audioElapsed, setAudioElapsed] = useState(elapsed);
   const isHost = party.participants.some((participant) => participant.id === session.participantId && participant.isHost);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const isPaused = Boolean(party.playbackPausedAt || !party.playbackStartedAt);
+  const displayElapsed = current?.previewUrl ? audioElapsed : elapsed;
+  const [needInteractionToPlay, setNeedInteractionToPlay] = useState(false);
+  const [floatingEmojis, setFloatingEmojis] = useState<Array<{ id: string; emoji: string; left: number; height: number }>>([]);
+
+  const spawnEmoji = (type: ReactionType) => {
+    const emojiMap: Record<ReactionType, string> = {
+      FIRE: "🔥",
+      VIBE: "❤️",
+      MEH: "😐",
+      SKIP: "🚫",
+      GOAT: "🐐",
+    };
+    const emoji = emojiMap[type] || "🔥";
+    const left = 20 + Math.random() * 60;
+    const height = -150 - Math.random() * 200;
+    const id = Math.random().toString(36).substring(2);
+    setFloatingEmojis((prev) => [...prev, { id, emoji, left, height }]);
+    setTimeout(() => {
+      setFloatingEmojis((prev) => prev.filter((item) => item.id !== id));
+    }, 2200);
+  };
+
+  useEffect(() => {
+    socket.on("reaction:receive", ({ type }) => {
+      spawnEmoji(type);
+    });
+    return () => {
+      socket.off("reaction:receive");
+    };
+  }, []);
+
+  const playAudio = (audioElement: HTMLAudioElement | null) => {
+    if (!audioElement) return;
+    audioElement.play().catch((err) => {
+      if (err.name === "NotAllowedError") {
+        setNeedInteractionToPlay(true);
+      }
+    });
+  };
+
+  const syncAudioTime = (audio: HTMLAudioElement, targetSeconds: number) => {
+    if (audio.readyState >= 1) {
+      audio.currentTime = targetSeconds;
+      if (!isPaused) playAudio(audio);
+    } else {
+      const handleMetadata = () => {
+        audio.currentTime = targetSeconds;
+        if (!isPaused) playAudio(audio);
+      };
+      audio.addEventListener("loadedmetadata", handleMetadata, { once: true });
+    }
+  };
+
+  useEffect(() => {
+    const handleGlobalClick = () => {
+      if (needInteractionToPlay) {
+        const audio = audioRef.current;
+        if (audio && !isPaused) {
+          audio.play()
+            .then(() => setNeedInteractionToPlay(false))
+            .catch(() => undefined);
+        }
+      }
+    };
+    window.addEventListener("click", handleGlobalClick);
+    return () => window.removeEventListener("click", handleGlobalClick);
+  }, [needInteractionToPlay, isPaused]);
+
+  useEffect(() => {
+    setAudioElapsed(elapsed);
+  }, [current?.id]);
+
+  useEffect(() => {
+    function handlePlaybackSync(payload: { action: "play" | "pause" | "stop"; party: Party }) {
+      const audio = audioRef.current;
+      if (payload.action === "stop" || payload.party.status === "ENDED") {
+        audio?.pause();
+        if (audio) audio.currentTime = 0;
+        if (spotifyReady && accessToken && spotifyDeviceId) {
+          void pauseSpotifyPlayback(accessToken, spotifyDeviceId).catch(() => undefined);
+        }
+        return;
+      }
+
+      const syncedSong = payload.party.songs.find((song) => song.id === payload.party.currentSongId);
+      const syncedElapsed = getPartyElapsed(payload.party, syncedSong);
+      if (audio && syncedSong?.previewUrl) {
+        const seconds = Math.min(syncedElapsed / 1000, Math.max(0, audio.duration || 30) - 0.25);
+        syncAudioTime(audio, seconds);
+        setAudioElapsed(seconds * 1000);
+        if (payload.action === "play") {
+          playAudio(audio);
+        } else {
+          audio.pause();
+        }
+      }
+    }
+
+    socket.on("playback:sync", handlePlaybackSync);
+    return () => {
+      socket.off("playback:sync", handlePlaybackSync);
+      const audio = audioRef.current;
+      if (audio) {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+      if (spotifyReady && accessToken && spotifyDeviceId) {
+        void pauseSpotifyPlayback(accessToken, spotifyDeviceId).catch(() => undefined);
+      }
+    };
+  }, [accessToken, spotifyDeviceId, spotifyReady]);
 
   useEffect(() => {
     if (!spotifyReady || !accessToken || !spotifyDeviceId || !current?.spotifyUri) return;
+    if (party.status === "ENDED") {
+      void pauseSpotifyPlayback(accessToken, spotifyDeviceId).catch(() => undefined);
+      return;
+    }
     if (isPaused) {
       void pauseSpotifyPlayback(accessToken, spotifyDeviceId).catch(() => undefined);
     } else {
       void playSpotifyTrack(accessToken, spotifyDeviceId, current.spotifyUri, elapsed).catch(() => undefined);
     }
-  }, [current?.id, isPaused, spotifyReady, accessToken, spotifyDeviceId]);
+  }, [current?.id, isPaused, party.status, spotifyReady, accessToken, spotifyDeviceId, party.elapsedMs, party.playbackStartedAt]);
 
   useEffect(() => {
     const audio = audioRef.current;
+    if (party.status === "ENDED") {
+      audio?.pause();
+      if (audio) audio.currentTime = 0;
+      return;
+    }
     if (!audio || !current?.previewUrl) return;
     const seconds = Math.min(elapsed / 1000, Math.max(0, audio.duration || 30) - 0.25);
-    if (Math.abs(audio.currentTime - seconds) > 1.25) {
-      audio.currentTime = seconds;
-    }
+    syncAudioTime(audio, seconds);
+    setAudioElapsed(seconds * 1000);
     if (isPaused) {
       audio.pause();
-    } else {
-      void audio.play().catch(() => undefined);
     }
-  }, [current?.id, current?.previewUrl, elapsed, isPaused]);
+  }, [current?.id, current?.previewUrl, isPaused, party.status, party.elapsedMs, party.playbackStartedAt]);
 
   return (
     <>
-      <header className="flex h-12 items-center justify-between px-4">
-        <div className="font-display text-2xl font-bold text-primary">Nero Party</div>
+      <div className="fixed inset-0 pointer-events-none z-50 overflow-hidden">
+        {floatingEmojis.map((item) => (
+          <div
+            key={item.id}
+            className="absolute bottom-10 animate-float-up text-4xl"
+            style={{ left: `${item.left}%`, "--float-height": `${item.height}px` } as React.CSSProperties}
+          >
+            {item.emoji}
+          </div>
+        ))}
+      </div>
+      {needInteractionToPlay && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="glass-card text-center max-w-sm p-8 space-y-6">
+            <span className="icon text-6xl text-primary">volume_up</span>
+            <div>
+              <h3 className="font-display text-2xl font-bold">Unmute Party Audio</h3>
+              <p className="text-sm text-on-surface-variant mt-2">Your browser has blocked autoplay. Click below to start listening with the party!</p>
+            </div>
+            <button
+              onClick={() => {
+                setNeedInteractionToPlay(false);
+                const audio = audioRef.current;
+                if (audio) {
+                  const seconds = Math.min(elapsed / 1000, Math.max(0, audio.duration || 30) - 0.25);
+                  audio.currentTime = seconds;
+                  audio.play().catch(() => undefined);
+                }
+              }}
+              className="w-full bg-primary text-white rounded-full py-4 font-semibold shadow-lg transition active:scale-95 hover:bg-primary/95"
+            >
+              Start Listening
+            </button>
+          </div>
+        </div>
+      )}
+      <header className="flex items-center justify-between px-4 py-2">
+        <div>
+          <div className="font-display text-2xl font-bold text-primary leading-none">Nero Party</div>
+          <div className="text-xs font-semibold text-on-surface-variant mt-1">{party.name}</div>
+        </div>
         <button onClick={onLeave} className="rounded-full bg-surface-container-high px-4 py-2 text-sm font-semibold text-on-surface-variant">Leave Party</button>
       </header>
       <main className="mx-auto grid max-h-[calc(100vh-48px)] max-w-[1280px] grid-cols-1 gap-4 overflow-hidden px-4 pb-4 pt-3 md:grid-cols-12">
-        <audio ref={audioRef} src={current?.previewUrl ?? undefined} preload="auto" />
+        <audio
+          ref={audioRef}
+          src={current?.previewUrl ?? undefined}
+          preload="auto"
+          onLoadedMetadata={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
+          onTimeUpdate={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
+          onSeeking={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
+          onSeeked={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
+          onPause={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
+          onPlay={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
+        />
         <aside className="hidden md:col-span-3 md:block">
           <ParticipantList participants={party.participants} compact />
         </aside>
         <section className="md:col-span-6">
-          {current ? <NowPlaying party={party} session={session} song={current} elapsed={elapsed} isPaused={isPaused} /> : <EmptyQueue />}
+          {current ? <NowPlaying party={party} session={session} song={current} elapsed={displayElapsed} isPaused={isPaused} onReact={spawnEmoji} /> : <EmptyQueue />}
           <PlaybackControls
             party={party}
             session={session}
             isPaused={isPaused}
             previewAudio={audioRef.current}
-            previewOffsetMs={elapsed}
+            previewOffsetMs={displayElapsed}
+            previewAvailable={Boolean(current?.previewUrl)}
           />
           {isHost && (
             <div className="mt-3 flex justify-center">
@@ -475,12 +649,14 @@ function NowPlaying({
   song,
   elapsed,
   isPaused,
+  onReact,
 }: {
   party: Party;
   session: Session;
   song: Song;
   elapsed: number;
   isPaused: boolean;
+  onReact: (type: ReactionType) => void;
 }) {
   const percent = Math.min(100, (elapsed / song.durationMs) * 100);
   return (
@@ -503,7 +679,7 @@ function NowPlaying({
         </div>
       </div>
       <VibeTokens party={party} session={session} song={song} />
-      <ReactionBar party={party} session={session} song={song} />
+      <ReactionBar party={party} session={session} song={song} onReact={onReact} />
     </section>
   );
 }
@@ -514,12 +690,14 @@ function PlaybackControls({
   isPaused,
   previewAudio,
   previewOffsetMs,
+  previewAvailable,
 }: {
   party: Party;
   session: Session;
   isPaused: boolean;
   previewAudio: HTMLAudioElement | null;
   previewOffsetMs: number;
+  previewAvailable: boolean;
 }) {
   function playLocalPreview() {
     if (!previewAudio) return;
@@ -530,15 +708,15 @@ function PlaybackControls({
   return (
     <div className="mt-3 flex items-center justify-center gap-3">
       <button
-        onClick={() => socket.emit("playback:rewind", { code: party.code, participantId: session.participantId, amountMs: 10_000 })}
+        onClick={() => socket.emit("playback:previous", { code: party.code, participantId: session.participantId })}
         className="glass-card flex h-11 w-11 items-center justify-center rounded-full text-primary active:scale-95"
-        title="Rewind 10 seconds"
+        title="Restart or previous song"
       >
-        <span className="icon">replay_10</span>
+        <span className="icon">skip_previous</span>
       </button>
       <button
         onClick={() => {
-          if (isPaused) playLocalPreview();
+          if (isPaused && previewAvailable) playLocalPreview();
           socket.emit(isPaused ? "playback:play" : "playback:pause", { code: party.code, participantId: session.participantId });
         }}
         className="flex h-14 w-14 items-center justify-center rounded-full bg-primary-container text-primary shadow-lg active:scale-95"
@@ -558,7 +736,13 @@ function PlaybackControls({
 }
 
 function VibeTokens({ party, session, song }: { party: Party; session: Session; song: Song }) {
-  const [selected, setSelected] = useState(0);
+  const userVote = song.votes?.find((v) => v.participantId === session.participantId)?.tokens ?? 0;
+  const [selected, setSelected] = useState(userVote);
+
+  useEffect(() => {
+    setSelected(userVote);
+  }, [song.id, userVote]);
+
   function update(next: number) {
     setSelected(next);
     socket.emit("vote:update", { code: party.code, participantId: session.participantId, songId: song.id, tokens: next });
@@ -578,13 +762,34 @@ function VibeTokens({ party, session, song }: { party: Party; session: Session; 
   );
 }
 
-function ReactionBar({ party, session, song }: { party: Party; session: Session; song: Song }) {
+function ReactionBar({
+  party,
+  session,
+  song,
+  onReact,
+}: {
+  party: Party;
+  session: Session;
+  song: Song;
+  onReact: (type: ReactionType) => void;
+}) {
   return (
     <div className="mt-3 flex flex-wrap justify-center gap-4">
       {reactions.map((reaction) => (
         <div key={reaction.type} className="flex flex-col items-center gap-1">
-          <button onClick={() => socket.emit("reaction:send", { code: party.code, participantId: session.participantId, songId: song.id, type: reaction.type })} className="glass-card flex h-10 w-10 items-center justify-center transition active:scale-90" title={reaction.label}>
-            <span className={`icon ${reaction.color}`}>{reaction.icon}</span>
+          <button
+            onClick={() => {
+              onReact(reaction.type);
+              socket.emit("reaction:send", { code: party.code, participantId: session.participantId, songId: song.id, type: reaction.type });
+            }}
+            className="glass-card flex h-10 w-10 items-center justify-center transition active:scale-90"
+            title={reaction.label}
+          >
+            {reaction.type === "GOAT" ? (
+              <span className="text-xl leading-none">🐐</span>
+            ) : (
+              <span className={`icon ${reaction.color}`}>{reaction.icon}</span>
+            )}
           </button>
           <span className="text-[10px] font-bold text-on-surface-variant">{song.reactionsByType[reaction.type] ?? 0}</span>
         </div>
@@ -627,7 +832,7 @@ function QueuePanel({ party, session }: { party: Party; session: Session }) {
       </div>
       <div className="max-h-[52vh] space-y-2 overflow-y-auto">
         {party.songs.map((song) => (
-          <TrackRow key={song.id} track={song} meta={song.submittedBy} />
+          <TrackRow key={song.id} track={song} meta={`added by ${song.submittedBy}`} />
         ))}
       </div>
     </GlassCard>
@@ -855,10 +1060,13 @@ function useElapsed(party: Party, song?: Song) {
     return () => window.clearInterval(interval);
   }, []);
   return useMemo(() => {
-    if (!song || !party.playbackStartedAt) return party.elapsedMs;
-    if (party.playbackPausedAt) return party.elapsedMs;
-    return Math.min(song.durationMs, party.elapsedMs + now - new Date(party.playbackStartedAt).getTime());
+    return getPartyElapsed(party, song, now);
   }, [now, party.elapsedMs, party.playbackPausedAt, party.playbackStartedAt, song]);
+}
+
+function getPartyElapsed(party: Party, song?: Song, now = Date.now()) {
+  if (!song || !party.playbackStartedAt || party.playbackPausedAt) return party.elapsedMs;
+  return Math.min(song.durationMs, party.elapsedMs + now - new Date(party.playbackStartedAt).getTime());
 }
 
 function parseRoute() {

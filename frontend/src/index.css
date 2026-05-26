@@ -41,3 +41,24 @@
     -webkit-font-smoothing: antialiased;
   }
 }
+
+@keyframes float-up {
+  0% {
+    transform: translateY(0) scale(0.6);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+    transform: translateY(-20px) scale(1.1);
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(var(--float-height, -260px)) scale(0.7);
+    opacity: 0;
+  }
+}
+.animate-float-up {
+  animation: float-up 2.2s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}

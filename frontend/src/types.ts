@@ -33,6 +33,7 @@ export type Song = Track & {
   voterCount: number;
   submittedBy: string;
   reactionsByType: Partial<Record<ReactionType, number>>;
+  votes?: Array<{ participantId: string; tokens: number }>;
 };
 
 export type Party = {

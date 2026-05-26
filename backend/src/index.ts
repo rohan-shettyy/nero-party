@@ -120,7 +120,7 @@ io.on("connection", (socket) => {
     try {
       const party = await parties.startParty(code, participantId);
       io.to(code).emit("party:state", party);
-      io.to(code).emit("playback:sync", party);
+      emitPlaybackSync(code, party, "play");
       scheduleAutoAdvance(code, party);
     } catch (error) {
       socket.emit("party:error", toError(error));
@@ -140,6 +140,7 @@ io.on("connection", (socket) => {
     try {
       const party = await parties.addReaction(code, participantId, songId, type as ReactionType);
       io.to(code).emit("party:state", party);
+      socket.to(code).emit("reaction:receive", { type });
     } catch (error) {
       socket.emit("party:error", toError(error));
     }
@@ -149,7 +150,7 @@ io.on("connection", (socket) => {
     try {
       const party = await parties.skipSong(code, participantId);
       io.to(code).emit("party:state", party);
-      io.to(code).emit("playback:sync", party);
+      emitPlaybackSync(code, party, party?.status === "ENDED" ? "stop" : "play");
       scheduleAutoAdvance(code, party);
     } catch (error) {
       socket.emit("party:error", toError(error));
@@ -161,7 +162,7 @@ io.on("connection", (socket) => {
       const party = await parties.pausePlayback(code);
       clearAutoAdvance(code);
       io.to(code).emit("party:state", party);
-      io.to(code).emit("playback:sync", party);
+      emitPlaybackSync(code, party, "pause");
     } catch (error) {
       socket.emit("party:error", toError(error));
     }
@@ -171,18 +172,18 @@ io.on("connection", (socket) => {
     try {
       const party = await parties.resumePlayback(code);
       io.to(code).emit("party:state", party);
-      io.to(code).emit("playback:sync", party);
+      emitPlaybackSync(code, party, "play");
       scheduleAutoAdvance(code, party);
     } catch (error) {
       socket.emit("party:error", toError(error));
     }
   });
 
-  socket.on("playback:rewind", async ({ code, amountMs }) => {
+  socket.on("playback:previous", async ({ code }) => {
     try {
-      const party = await parties.rewindPlayback(code, amountMs);
+      const party = await parties.previousOrRestart(code);
       io.to(code).emit("party:state", party);
-      io.to(code).emit("playback:sync", party);
+      emitPlaybackSync(code, party, party?.playbackPausedAt ? "pause" : "play");
       scheduleAutoAdvance(code, party);
     } catch (error) {
       socket.emit("party:error", toError(error));
@@ -206,6 +207,7 @@ io.on("connection", (socket) => {
       const party = await parties.endParty(code, participantId);
       clearAutoAdvance(code);
       io.to(code).emit("party:state", party);
+      emitPlaybackSync(code, party, "stop");
     } catch (error) {
       socket.emit("party:error", toError(error));
     }
@@ -254,10 +256,18 @@ function scheduleAutoAdvance(code: string, party: Awaited<ReturnType<typeof part
     setTimeout(async () => {
       const nextParty = await parties.advanceCurrentSong(code);
       io.to(code).emit("party:state", nextParty);
-      io.to(code).emit("playback:sync", nextParty);
+      emitPlaybackSync(code, nextParty, nextParty?.status === "ENDED" ? "stop" : "play");
       scheduleAutoAdvance(code, nextParty);
     }, remainingMs),
   );
+}
+
+function emitPlaybackSync(
+  code: string,
+  party: Awaited<ReturnType<typeof parties.serializeParty>>,
+  action: "play" | "pause" | "stop",
+) {
+  io.to(code).emit("playback:sync", { action, party });
 }
 
 function clearAutoAdvance(code: string) {
