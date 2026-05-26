@@ -218,10 +218,6 @@ io.on("connection", (socket) => {
     if (!code) return;
     const party = await parties.serializeParty(code);
     io.to(code).emit("party:state", party);
-    setTimeout(async () => {
-      const nextParty = await parties.cleanupDisconnects(code);
-      io.to(code).emit("party:state", nextParty);
-    }, 65_000);
   });
 });
 

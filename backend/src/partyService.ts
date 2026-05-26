@@ -423,59 +423,51 @@ export function createPartyService(prisma: PrismaClient) {
   }
 
   async function markParticipantAway(socketId: string) {
-    const participant = await prisma.participant.findFirst({ where: { socketId }, include: { party: true } });
+    const participant = await prisma.participant.findFirst({
+      where: { socketId },
+      include: { party: { include: { participants: { where: { isRemoved: false } } } } }
+    });
     if (!participant) return null;
+
+    // Set participant as removed
     await prisma.participant.update({
       where: { id: participant.id },
+      data: { isAway: false, isRemoved: true, socketId: null },
+    });
+
+    await prisma.partyEvent.create({
       data: {
-        isAway: true,
-        lastSeenAt: new Date(),
-        socketId: null,
-        reclaimExpiresAt: new Date(Date.now() + 5 * 60 * 1000),
+        partyId: participant.party.id,
+        type: "participant_left",
+        message: `${participant.displayName} left the party.`,
       },
     });
-    return participant.party.code;
-  }
 
-  async function cleanupDisconnects(code: string) {
-    const party = await prisma.party.findUnique({
-      where: { code: normalizeCode(code) },
-      include: { participants: { orderBy: { joinedAt: "asc" } } },
-    });
-    if (!party) return null;
-
-    const awayCutoff = new Date(Date.now() - 30 * 1000);
-    await prisma.participant.updateMany({
-      where: {
-        partyId: party.id,
-        isAway: true,
-        isHost: false,
-        lastSeenAt: { lt: awayCutoff },
-      },
-      data: { isRemoved: true },
-    });
-
-    const host = party.participants.find((participant) => participant.isHost);
-    if (host?.isAway && host.lastSeenAt < new Date(Date.now() - 60 * 1000)) {
-      const nextHost = party.participants.find(
-        (participant) => !participant.isHost && !participant.isAway && !participant.isRemoved,
-      );
-      if (nextHost) {
-        await prisma.$transaction([
-          prisma.participant.update({ where: { id: host.id }, data: { isHost: false } }),
-          prisma.participant.update({ where: { id: nextHost.id }, data: { isHost: true } }),
-          prisma.partyEvent.create({
-            data: {
-              partyId: party.id,
-              type: "host_promoted",
-              message: `${nextHost.displayName} was promoted to host.`,
-            },
-          }),
-        ]);
+    // If host is leaving, promote next active participant
+    if (participant.isHost) {
+      const remaining = participant.party.participants.filter(p => !p.isRemoved && p.id !== participant.id);
+      if (remaining.length > 0) {
+        await prisma.participant.update({
+          where: { id: remaining[0].id },
+          data: { isHost: true },
+        });
+        await prisma.partyEvent.create({
+          data: {
+            partyId: participant.party.id,
+            type: "host_promoted",
+            message: `${remaining[0].displayName} was promoted to host.`,
+          },
+        });
+      } else {
+        // No participants left, end the party
+        await prisma.party.update({
+          where: { id: participant.party.id },
+          data: { status: "ENDED", endedAt: new Date(), currentSongId: null },
+        });
       }
     }
 
-    return serializeParty(code);
+    return participant.party.code;
   }
 
   async function attachSocket(code: string, participantId: string, socketId: string) {
@@ -551,7 +543,6 @@ export function createPartyService(prisma: PrismaClient) {
     endParty,
     leaveParty,
     markParticipantAway,
-    cleanupDisconnects,
     attachSocket,
   };
 }

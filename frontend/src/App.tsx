@@ -30,6 +30,31 @@ function App() {
   const [spotifyDeviceId, setSpotifyDeviceId] = useState<string | null>(null);
   const route = parseRoute();
 
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    const preWarmAudio = () => {
+      const audio = audioRef.current;
+      if (!audio || audio.dataset.warmed === "true") return;
+      if (audio.src && !audio.src.startsWith("data:")) return; // Prevent overwriting active song URL
+      audio.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAAA";
+      audio.play()
+        .then(() => {
+          audio.pause();
+          audio.currentTime = 0;
+          audio.dataset.warmed = "true";
+        })
+        .catch(() => undefined);
+    };
+
+    window.addEventListener("click", preWarmAudio);
+    window.addEventListener("keydown", preWarmAudio);
+    return () => {
+      window.removeEventListener("click", preWarmAudio);
+      window.removeEventListener("keydown", preWarmAudio);
+    };
+  }, []);
+
   useEffect(() => {
     finishSpotifyLoginFromUrl()
       .then((result) => result && setTokens(result))
@@ -135,6 +160,7 @@ function App() {
 
   return (
     <>
+      <audio ref={audioRef} preload="auto" />
       {error && (
         <div className="fixed left-1/2 top-4 z-50 -translate-x-1/2 rounded-full bg-error-container px-5 py-2 text-sm font-semibold text-error shadow-glass">
           {error}
@@ -160,6 +186,7 @@ function App() {
           accessToken={tokens?.accessToken}
           spotifyDeviceId={spotifyDeviceId}
           onLeave={leaveParty}
+          audioRef={audioRef}
         />
       )}
       {activeView === "results" && party && <ResultsScreen party={party} onLeave={leaveParty} />}
@@ -404,6 +431,7 @@ function PartyScreen({
   accessToken,
   spotifyDeviceId,
   onLeave,
+  audioRef,
 }: {
   party: Party;
   session: Session;
@@ -411,12 +439,12 @@ function PartyScreen({
   accessToken?: string;
   spotifyDeviceId: string | null;
   onLeave: () => void;
+  audioRef: React.RefObject<HTMLAudioElement>;
 }) {
   const current = party.songs.find((song) => song.id === party.currentSongId) ?? party.songs[0];
   const elapsed = useElapsed(party, current);
   const [audioElapsed, setAudioElapsed] = useState(elapsed);
   const isHost = party.participants.some((participant) => participant.id === session.participantId && participant.isHost);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const isPaused = Boolean(party.playbackPausedAt || !party.playbackStartedAt);
   const displayElapsed = current?.previewUrl ? audioElapsed : elapsed;
   const [needInteractionToPlay, setNeedInteractionToPlay] = useState(false);
@@ -449,6 +477,8 @@ function PartyScreen({
     };
   }, []);
 
+  const pendingSeekTimeRef = useRef<number | null>(null);
+
   const playAudio = (audioElement: HTMLAudioElement | null) => {
     if (!audioElement) return;
     audioElement.play().catch((err) => {
@@ -459,17 +489,57 @@ function PartyScreen({
   };
 
   const syncAudioTime = (audio: HTMLAudioElement, targetSeconds: number) => {
-    if (audio.readyState >= 1) {
-      audio.currentTime = targetSeconds;
-      if (!isPaused) playAudio(audio);
-    } else {
-      const handleMetadata = () => {
+    const discrepancy = Math.abs(audio.currentTime - targetSeconds);
+    const shouldForceSync = targetSeconds <= 1.0 || discrepancy > 1.5;
+
+    if (shouldForceSync) {
+      if (audio.readyState >= 1) {
         audio.currentTime = targetSeconds;
         if (!isPaused) playAudio(audio);
-      };
-      audio.addEventListener("loadedmetadata", handleMetadata, { once: true });
+      } else {
+        pendingSeekTimeRef.current = targetSeconds; // Queue seek for loadedmetadata
+      }
+    } else {
+      if (!isPaused && audio.paused) {
+        playAudio(audio);
+      }
     }
   };
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const handleLoadedMetadata = () => {
+      if (pendingSeekTimeRef.current !== null) {
+        audio.currentTime = pendingSeekTimeRef.current;
+        pendingSeekTimeRef.current = null;
+        if (!isPaused) playAudio(audio);
+      }
+      setAudioElapsed(audio.currentTime * 1000);
+    };
+    const handleTimeUpdate = () => setAudioElapsed(audio.currentTime * 1000);
+    const handleSeeking = () => setAudioElapsed(audio.currentTime * 1000);
+    const handleSeeked = () => setAudioElapsed(audio.currentTime * 1000);
+    const handlePause = () => setAudioElapsed(audio.currentTime * 1000);
+    const handlePlay = () => setAudioElapsed(audio.currentTime * 1000);
+
+    audio.addEventListener("loadedmetadata", handleLoadedMetadata);
+    audio.addEventListener("timeupdate", handleTimeUpdate);
+    audio.addEventListener("seeking", handleSeeking);
+    audio.addEventListener("seeked", handleSeeked);
+    audio.addEventListener("pause", handlePause);
+    audio.addEventListener("play", handlePlay);
+
+    return () => {
+      audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      audio.removeEventListener("timeupdate", handleTimeUpdate);
+      audio.removeEventListener("seeking", handleSeeking);
+      audio.removeEventListener("seeked", handleSeeked);
+      audio.removeEventListener("pause", handlePause);
+      audio.removeEventListener("play", handlePlay);
+    };
+  }, [current?.id, isPaused]);
 
   useEffect(() => {
     const handleGlobalClick = () => {
@@ -491,34 +561,7 @@ function PartyScreen({
   }, [current?.id]);
 
   useEffect(() => {
-    function handlePlaybackSync(payload: { action: "play" | "pause" | "stop"; party: Party }) {
-      const audio = audioRef.current;
-      if (payload.action === "stop" || payload.party.status === "ENDED") {
-        audio?.pause();
-        if (audio) audio.currentTime = 0;
-        if (spotifyReady && accessToken && spotifyDeviceId) {
-          void pauseSpotifyPlayback(accessToken, spotifyDeviceId).catch(() => undefined);
-        }
-        return;
-      }
-
-      const syncedSong = payload.party.songs.find((song) => song.id === payload.party.currentSongId);
-      const syncedElapsed = getPartyElapsed(payload.party, syncedSong);
-      if (audio && syncedSong?.previewUrl) {
-        const seconds = Math.min(syncedElapsed / 1000, Math.max(0, audio.duration || 30) - 0.25);
-        syncAudioTime(audio, seconds);
-        setAudioElapsed(seconds * 1000);
-        if (payload.action === "play") {
-          playAudio(audio);
-        } else {
-          audio.pause();
-        }
-      }
-    }
-
-    socket.on("playback:sync", handlePlaybackSync);
     return () => {
-      socket.off("playback:sync", handlePlaybackSync);
       const audio = audioRef.current;
       if (audio) {
         audio.pause();
@@ -547,10 +590,17 @@ function PartyScreen({
     const audio = audioRef.current;
     if (party.status === "ENDED") {
       audio?.pause();
-      if (audio) audio.currentTime = 0;
+      if (audio) {
+        audio.src = "";
+        audio.currentTime = 0;
+      }
       return;
     }
     if (!audio || !current?.previewUrl) return;
+    if (audio.src !== current.previewUrl) {
+      audio.src = current.previewUrl;
+      audio.load(); // Force resource download immediately to trigger loadedmetadata even in background tabs
+    }
     const seconds = Math.min(elapsed / 1000, Math.max(0, audio.duration || 30) - 0.25);
     syncAudioTime(audio, seconds);
     setAudioElapsed(seconds * 1000);
@@ -602,20 +652,24 @@ function PartyScreen({
           <div className="font-display text-2xl font-bold text-primary leading-none">Nero Party</div>
           <div className="text-xs font-semibold text-on-surface-variant mt-1">{party.name}</div>
         </div>
-        <button onClick={onLeave} className="rounded-full bg-surface-container-high px-4 py-2 text-sm font-semibold text-on-surface-variant">Leave Party</button>
+        <div className="flex items-center gap-3">
+          {isHost && (
+            <div className="flex items-center gap-2 rounded-full border border-outline-variant/30 bg-white/70 px-3 py-1.5 shadow-sm">
+              <span className="text-xs font-bold uppercase tracking-wider text-primary mr-1">Code: {party.code}</span>
+              <button
+                onClick={() => navigator.clipboard.writeText(party.joinUrl)}
+                className="flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary hover:bg-primary/20 transition active:scale-95"
+                title="Copy Invite Link"
+              >
+                <span className="icon text-[12px]">content_copy</span>
+                Copy
+              </button>
+            </div>
+          )}
+          <button onClick={onLeave} className="rounded-full bg-surface-container-high px-4 py-2 text-sm font-semibold text-on-surface-variant">Leave Party</button>
+        </div>
       </header>
       <main className="mx-auto grid max-h-[calc(100vh-48px)] max-w-[1280px] grid-cols-1 gap-4 overflow-hidden px-4 pb-4 pt-3 md:grid-cols-12">
-        <audio
-          ref={audioRef}
-          src={current?.previewUrl ?? undefined}
-          preload="auto"
-          onLoadedMetadata={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
-          onTimeUpdate={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
-          onSeeking={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
-          onSeeked={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
-          onPause={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
-          onPlay={(event) => setAudioElapsed(event.currentTarget.currentTime * 1000)}
-        />
         <aside className="hidden md:col-span-3 md:block">
           <ParticipantList participants={party.participants} compact />
         </aside>

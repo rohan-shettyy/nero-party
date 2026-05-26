@@ -55,7 +55,9 @@ export async function finishSpotifyLoginFromUrl() {
   const code = params.get("code");
   if (!code) return null;
   const verifier = sessionStorage.getItem(VERIFIER_KEY);
-  if (!verifier) throw new Error("Missing Spotify verifier");
+  if (!verifier) return null; // Already processed or missing
+  sessionStorage.removeItem(VERIFIER_KEY); // Remove immediately to act as a lock against double-execution in StrictMode
+
   const redirectUri = sessionStorage.getItem(REDIRECT_URI_KEY) ?? `${window.location.origin}/spotify/callback`;
   const response = await exchangeSpotifyCode(code, verifier, redirectUri);
   const tokens = {
